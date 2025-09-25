@@ -1,0 +1,887 @@
+📂 final/main.go
+
+package main
+
+import (
+	"final/handlers"
+	"final/models"
+	"net/http"
+)
+
+func main() {
+	models.MariaDBConnection()
+
+	http.HandleFunc("/login", handlers.Login)
+	http.HandleFunc("/personal", handlers.SavePersonal)
+	http.HandleFunc("/addfund", handlers.AddFund)
+	http.HandleFunc("/withdraw", handlers.Withdraw)
+	http.HandleFunc("/billing", handlers.DownloadBillingCSV)
+	http.HandleFunc("/trading", handlers.GetShares)
+	http.HandleFunc("/buy", handlers.BuyShare)
+	http.HandleFunc("/sell", handlers.SellShare)
+	http.HandleFunc("/admin/dashboard", handlers.AdminDashboard)
+	http.HandleFunc("/admin/approve", handlers.ApproveUser)
+	http.HandleFunc("/admin/reject", handlers.RejectUser)
+
+	http.ListenAndServe(":8080", nil)
+}
+
+
+---
+
+📂 final/models/dbconnection.go
+
+package models
+
+import (
+	"log"
+
+	"github.com/yourcompany/ftdb"
+	"gorm.io/gorm"
+)
+
+var DB *gorm.DB
+
+func MariaDBConnection() {
+	err := ftdb.OpenDBConnection("192.168.2.5", "ST1006", "Best@123@123", "training", "mysql", "3306")
+	if err != nil {
+		log.Println("Failed to connect to DB", err)
+		return
+	}
+	DB = ftdb.GRMMariaFTPRDDB
+}
+
+
+---
+
+📂 final/models/models.go
+
+package models
+
+type Response struct {
+	Status    string `json:"status"`
+	ErrorCode string `json:"error_code"`
+	Errmsg    string `json:"errmsg"`
+	Msg       string `json:"msg"`
+}
+
+type User struct {
+	ID       uint   `gorm:"primaryKey"`
+	Name     string
+	MobileNo string
+	Email    string
+	StatusH  string
+}
+
+type Personal struct {
+	ID        uint   `gorm:"primaryKey"`
+	Fname     string
+	Mname     string
+	State     string
+	City      string
+	Pincode   string
+	Country   string
+	Address   string
+	Sltdcomp  string
+	Filepath  string
+	Income    string
+	Ifsc      string
+	AccountNo string
+}
+
+type Bank struct {
+	ID      uint   `gorm:"primaryKey"`
+	UserID  uint
+	Balance float64
+}
+
+type Transaction struct {
+	ID     uint   `gorm:"primaryKey"`
+	UserID uint
+	Type   string
+	Amount float64
+}
+
+
+---
+
+📂 final/handlers/common.go
+
+👉 helper for response
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"net/http"
+)
+
+func sendResponse(w http.ResponseWriter, resp models.Response) {
+	out, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "Internal JSON Error", http.StatusInternalServerError)
+		return
+	}
+	w.Write(out)
+}
+
+
+---
+
+📂 final/handlers/auth.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+	"regexp"
+)
+
+var Es models.Response
+
+type LoginRequest struct {
+	Name     string `json:"name"`
+	MobileNo string `json:"mobileno"`
+	Email    string `json:"email"`
+}
+
+func Login(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, bodyErr := ioutil.ReadAll(r.Body)
+		if bodyErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid Body"}
+			sendResponse(w, Es)
+			return
+		}
+
+		var req LoginRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		if len(req.MobileNo) != 10 {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Mobile must be 10 digits"}
+			sendResponse(w, Es)
+			return
+		}
+
+		emailValid, _ := regexp.MatchString(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, req.Email)
+		if !emailValid {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid Email"}
+			sendResponse(w, Es)
+			return
+		}
+
+		user := models.User{Name: req.Name, MobileNo: req.MobileNo, Email: req.Email, StatusH: "P"}
+		result := models.DB.Create(&user)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Login saved"}
+		sendResponse(w, Es)
+	}
+}
+
+
+---
+
+📂 final/handlers/bank.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+)
+
+type FundRequest struct {
+	ID     uint    `json:"id"`
+	Type   string  `json:"type"`
+	Amount float64 `json:"amount"`
+}
+
+func AddFund(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req FundRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		if req.Amount <= 0 {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Amount must be greater than 0"}
+			sendResponse(w, Es)
+			return
+		}
+
+		var bank models.Bank
+		models.DB.Where("user_id = ?", req.ID).First(&bank)
+
+		bank.Balance = bank.Balance + req.Amount
+		saveErr := models.DB.Save(&bank)
+		if saveErr.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Failed to update balance"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Fund added successfully"}
+		sendResponse(w, Es)
+	}
+}
+
+📂 final/handlers/withdraw.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+)
+
+type WithdrawRequest struct {
+	ID     uint    `json:"id"`
+	Amount float64 `json:"amount"`
+}
+
+func Withdraw(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req WithdrawRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		if req.Amount <= 0 {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Amount must be greater than 0"}
+			sendResponse(w, Es)
+			return
+		}
+
+		var bank models.Bank
+		models.DB.Where("user_id = ?", req.ID).First(&bank)
+
+		if bank.Balance < req.Amount {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Insufficient balance"}
+			sendResponse(w, Es)
+			return
+		}
+
+		bank.Balance = bank.Balance - req.Amount
+		saveErr := models.DB.Save(&bank)
+		if saveErr.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Failed to withdraw"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Withdraw successful"}
+		sendResponse(w, Es)
+	}
+}
+
+
+---
+
+📂 final/handlers/personal.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+	"regexp"
+)
+
+type PersonalRequest struct {
+	Fname     string `json:"fname"`
+	Mname     string `json:"mname"`
+	State     string `json:"state"`
+	City      string `json:"city"`
+	Pincode   string `json:"pincode"`
+	Country   string `json:"country"`
+	Address   string `json:"address"`
+	Sltdcomp  string `json:"sltdcomp"`
+	Filepath  string `json:"filepath"`
+	Income    string `json:"income"`
+	Ifsc      string `json:"ifsc"`
+	AccountNo string `json:"account_no"`
+}
+
+func SavePersonal(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req PersonalRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		ifscValid, _ := regexp.MatchString(`^[A-Z]{4}0[0-9]{6}$`, req.Ifsc)
+		if !ifscValid {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid IFSC"}
+			sendResponse(w, Es)
+			return
+		}
+
+		personal := models.Personal{
+			Fname:     req.Fname,
+			Mname:     req.Mname,
+			State:     req.State,
+			City:      req.City,
+			Pincode:   req.Pincode,
+			Country:   req.Country,
+			Address:   req.Address,
+			Sltdcomp:  req.Sltdcomp,
+			Filepath:  req.Filepath,
+			Income:    req.Income,
+			Ifsc:      req.Ifsc,
+			AccountNo: req.AccountNo,
+		}
+		result := models.DB.Create(&personal)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Personal info saved"}
+		sendResponse(w, Es)
+	}
+}
+
+📂 final/handlers/billing.go
+
+package handlers
+
+import (
+	"encoding/csv"
+	"encoding/json"
+	"final/models"
+	"net/http"
+	"strconv"
+)
+
+func DownloadBillingCSV(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodGet {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only GET allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		var transactions []models.Transaction
+		result := models.DB.Find(&transactions)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error fetching transactions"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Set headers for CSV download
+		w.Header().Set("Content-Disposition", "attachment;filename=billing.csv")
+		w.Header().Set("Content-Type", "text/csv")
+
+		writer := csv.NewWriter(w)
+		defer writer.Flush()
+
+		// Write CSV headers
+		writer.Write([]string{"ID", "UserID", "Type", "Amount"})
+
+		// Write each row
+		for _, t := range transactions {
+			row := []string{
+				strconv.Itoa(int(t.ID)),
+				strconv.Itoa(int(t.UserID)),
+				t.Type,
+				strconv.FormatFloat(t.Amount, 'f', 2, 64),
+			}
+			writer.Write(row)
+		}
+	}
+}
+
+
+---
+
+📂 final/handlers/trading.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+)
+
+type TradeRequest struct {
+	UserID uint    `json:"userid"`
+	Share  string  `json:"share"`
+	Type   string  `json:"type"`   // BUY / SELL
+	Amount float64 `json:"amount"`
+}
+
+func GetShares(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodGet {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only GET allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		// Dummy shares list (you can replace with DB if needed)
+		shares := []map[string]interface{}{
+			{"name": "TCS", "price": 3500},
+			{"name": "INFY", "price": 1500},
+			{"name": "WIPRO", "price": 400},
+		}
+
+		out, marshalErr := json.Marshal(shares)
+		if marshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "JSON Marshal error"}
+			sendResponse(w, Es)
+			return
+		}
+		w.Write(out)
+	}
+}
+
+func BuyShare(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req TradeRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		if req.Amount <= 0 {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Amount must be greater than 0"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Save transaction
+		trade := models.Transaction{UserID: req.UserID, Type: "BUY", Amount: req.Amount}
+		result := models.DB.Create(&trade)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Share purchased successfully"}
+		sendResponse(w, Es)
+	}
+}
+
+func SellShare(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req TradeRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		if req.Amount <= 0 {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Amount must be greater than 0"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Save transaction
+		trade := models.Transaction{UserID: req.UserID, Type: "SELL", Amount: req.Amount}
+		result := models.DB.Create(&trade)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Share sold successfully"}
+		sendResponse(w, Es)
+	}
+}
+
+
+---
+
+📂 final/handlers/admin.go
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"net/http"
+)
+
+type AdminDashboardResponse struct {
+	TotalUsers     int     `json:"total_users"`
+	ActiveUsers    int     `json:"active_users"`
+	TotalBalance   float64 `json:"total_balance"`
+	TotalInvested  float64 `json:"total_invested"`
+	TotalWithdrawn float64 `json:"total_withdrawn"`
+}
+
+type ApproveUserRequest struct {
+	UserID uint `json:"user_id"`
+}
+
+type RejectUserRequest struct {
+	UserID uint `json:"user_id"`
+}
+
+func AdminDashboard(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodGet {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only GET allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		var totalUsers int64
+		var activeUsers int64
+		var totalBalance float64
+		var totalInvested float64
+		var totalWithdrawn float64
+
+		models.DB.Model(&models.User{}).Count(&totalUsers)
+		models.DB.Model(&models.User{}).Where("status_h = ?", "A").Count(&activeUsers)
+		models.DB.Table("st1006_bank").Select("SUM(balance)").Row().Scan(&totalBalance)
+		models.DB.Table("st1006_transaction").Select("SUM(amount)").Where("type = ?", "BUY").Row().Scan(&totalInvested)
+		models.DB.Table("st1006_transaction").Select("SUM(amount)").Where("type = ?", "WITHDRAW").Row().Scan(&totalWithdrawn)
+
+		resp := AdminDashboardResponse{
+			TotalUsers:     int(totalUsers),
+			ActiveUsers:    int(activeUsers),
+			TotalBalance:   totalBalance,
+			TotalInvested:  totalInvested,
+			TotalWithdrawn: totalWithdrawn,
+		}
+
+		out, marshalErr := json.Marshal(resp)
+		if marshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Marshal error"}
+			sendResponse(w, Es)
+			return
+		}
+		w.Write(out)
+	}
+}
+
+func ApproveUser(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		var req ApproveUserRequest
+		bodyErr := json.NewDecoder(r.Body).Decode(&req)
+		if bodyErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		updateErr := models.DB.Model(&models.User{}).Where("id = ?", req.UserID).Update("status_h", "A")
+		if updateErr.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "User approved"}
+		sendResponse(w, Es)
+	}
+}
+
+func RejectUser(w http.ResponseWriter, r *http.Request) {
+	// CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		var req RejectUserRequest
+		bodyErr := json.NewDecoder(r.Body).Decode(&req)
+		if bodyErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		updateErr := models.DB.Model(&models.User{}).Where("id = ?", req.UserID).Update("status_h", "I")
+		if updateErr.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		Es = models.Response{Status: "SUCCESS", Msg: "User rejected"}
+		sendResponse(w, Es)
+	}
+}
+
+
+USERDASHBOAORDhttp.HandleFunc("/dashboard", handlers.UserDashboard)
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"net/http"
+)
+
+type UserDashboardRequest struct {
+	UserID uint `json:"user_id"`
+}
+
+type UserDashboardResponse struct {
+	Balance        float64 `json:"balance"`
+	TotalInvested  float64 `json:"total_invested"`
+	TotalWithdrawn float64 `json:"total_withdrawn"`
+}
+
+func UserDashboard(w http.ResponseWriter, r *http.Request) {
+	// CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "false")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		var req UserDashboardRequest
+		decodeErr := json.NewDecoder(r.Body).Decode(&req)
+		if decodeErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		var balance float64
+		var invested float64
+		var withdrawn float64
+
+		// Get balance from bank table
+		models.DB.Table("st1006_bank").Select("balance").Where("user_id = ?", req.UserID).Row().Scan(&balance)
+
+		// Get invested (all BUY transactions)
+		models.DB.Table("st1006_transaction").Select("SUM(amount)").Where("user_id = ? AND type = ?", req.UserID, "BUY").Row().Scan(&invested)
+
+		// Get withdrawn (all WITHDRAW transactions)
+		models.DB.Table("st1006_transaction").Select("SUM(amount)").Where("user_id = ? AND type = ?", req.UserID, "WITHDRAW").Row().Scan(&withdrawn)
+
+		resp := UserDashboardResponse{
+			Balance:        balance,
+			TotalInvested:  invested,
+			TotalWithdrawn: withdrawn,
+		}
+
+		out, marshalErr := json.Marshal(resp)
+		if marshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Marshal error"}
+			sendResponse(w, Es)
+			return
+		}
+		w.Write(out)
+	}
+}
+
+
+updated auth
+
+package handlers
+
+import (
+	"encoding/json"
+	"final/models"
+	"io/ioutil"
+	"net/http"
+	"regexp"
+	"time"
+)
+
+type LoginRequest struct {
+	Name     string `json:"name"`
+	Mobileno string `json:"mobileno"`
+	Email    string `json:"email"`
+}
+
+func Login(w http.ResponseWriter, r *http.Request) {
+	// CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method != http.MethodPost {
+		Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Only POST allowed"}
+		sendResponse(w, Es)
+		return
+	} else {
+		body, _ := ioutil.ReadAll(r.Body)
+		var req LoginRequest
+		unmarshalErr := json.Unmarshal(body, &req)
+		if unmarshalErr != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid JSON"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Validation: Mobile = 10 digits
+		mobileValid, _ := regexp.MatchString(`^[0-9]{10}$`, req.Mobileno)
+		if !mobileValid {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Mobile must be 10 digits"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Validation: Email format
+		emailValid, _ := regexp.MatchString(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, req.Email)
+		if !emailValid {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "Invalid email format"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Save in DB
+		user := models.User{Name: req.Name, Mobile: req.Mobileno, Email: req.Email, Status: "A"}
+		result := models.DB.Create(&user)
+		if result.Error != nil {
+			Es = models.Response{Status: "FAIL", ErrorCode: "MM01", Errmsg: "DB Error"}
+			sendResponse(w, Es)
+			return
+		}
+
+		// Set cookie for session
+		cookie := http.Cookie{
+			Name:     "session_id",
+			Value:    req.Mobileno, // for simplicity, using mobile as session id
+			Expires:  time.Now().Add(24 * time.Hour),
+			HttpOnly: true,
+		}
+		http.SetCookie(w, &cookie)
+
+		Es = models.Response{Status: "SUCCESS", Msg: "Login successful, cookie set"}
+		sendResponse(w, Es)
+	}
+}
